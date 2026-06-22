@@ -39,6 +39,21 @@ func (h *JobHandler) List(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(jobs)
 }
 
+func (h *JobHandler) ListApproved(w http.ResponseWriter, r *http.Request) {
+	jobs, err := h.jobRepo.ListApproved()
+	if err != nil {
+		http.Error(w, `{"error":"failed to fetch jobs"}`, http.StatusInternalServerError)
+		return
+	}
+
+	if jobs == nil {
+		jobs = []models.JobApp{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(jobs)
+}
+
 func (h *JobHandler) Create(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 10240)
 
@@ -67,6 +82,10 @@ func (h *JobHandler) Create(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"`+errMsg+`"}`, http.StatusBadRequest)
 		return
 	}
+	if errMsg := middleware.ValidateCategoryInList(req.Category); errMsg != "" {
+		http.Error(w, `{"error":"`+errMsg+`"}`, http.StatusBadRequest)
+		return
+	}
 	if errMsg := middleware.ValidateLocation(req.Location); errMsg != "" {
 		http.Error(w, `{"error":"`+errMsg+`"}`, http.StatusBadRequest)
 		return
@@ -74,6 +93,8 @@ func (h *JobHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	req.JobTitle = strings.TrimSpace(req.JobTitle)
 	req.Description = strings.TrimSpace(req.Description)
+	req.Category = strings.TrimSpace(req.Category)
+	req.Location = strings.TrimSpace(req.Location)
 
 	job, err := h.jobRepo.Create(clientID, req.JobTitle, req.Description, req.Category, req.Location)
 	if err != nil {
@@ -154,6 +175,10 @@ func (h *JobHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Category != "" {
 		if errMsg := middleware.ValidateCategory(req.Category); errMsg != "" {
+			http.Error(w, `{"error":"`+errMsg+`"}`, http.StatusBadRequest)
+			return
+		}
+		if errMsg := middleware.ValidateCategoryInList(req.Category); errMsg != "" {
 			http.Error(w, `{"error":"`+errMsg+`"}`, http.StatusBadRequest)
 			return
 		}

@@ -3,8 +3,10 @@ package middleware
 import (
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -64,30 +66,107 @@ func ValidateDescription(desc string) string {
 }
 
 func ValidateCategory(cat string) string {
-	if len(cat) > 100 {
+	trimmed := strings.TrimSpace(cat)
+	if trimmed == "" {
+		return "category is required"
+	}
+	if len(trimmed) > 100 {
 		return "category must be under 100 characters"
 	}
 	return ""
 }
 
 func ValidateLocation(loc string) string {
-	if len(loc) > 200 {
+	trimmed := strings.TrimSpace(loc)
+	if trimmed == "" {
+		return "location is required"
+	}
+	if len(trimmed) > 200 {
 		return "location must be under 200 characters"
 	}
 	return ""
 }
 
-func CORS(origin string) func(http.Handler) http.Handler {
+// ValidateOptionalURL accepts empty, but rejects malformed or non-http(s) URLs.
+// Returns "" if valid, else an error message.
+func ValidateOptionalURL(field, raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	if len(trimmed) > 2048 {
+		return field + " must be under 2048 characters"
+	}
+	u, err := url.Parse(trimmed)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return field + " must be a valid URL"
+	}
+	if s := strings.ToLower(u.Scheme); s != "http" && s != "https" {
+		return field + " must use http or https"
+	}
+	return ""
+}
+
+func ValidateOptionalText(field, raw string, max int) string {
+	trimmed := strings.TrimSpace(raw)
+	if len(trimmed) > max {
+		return field + " must be under " + strconv.Itoa(max) + " characters"
+	}
+	return ""
+}
+
+func ValidatePhone(phone string) string {
+	trimmed := strings.TrimSpace(phone)
+	if trimmed == "" {
+		return "phone number is required"
+	}
+	digits := 0
+	for _, c := range trimmed {
+		if c >= '0' && c <= '9' {
+			digits++
+		}
+	}
+	if digits < 7 || digits > 15 {
+		return "phone number must contain 7 to 15 digits"
+	}
+	return ""
+}
+
+func CORS(origins string) func(http.Handler) http.Handler {
+	allowed := map[string]struct{}{}
+	wildcard := false
+	for _, o := range strings.Split(origins, ",") {
+		o = strings.TrimSpace(o)
+		if o == "" {
+			continue
+		}
+		if o == "*" {
+			wildcard = true
+		}
+		allowed[o] = struct{}{}
+	}
+
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if origin != "" && origin != "*" {
+			origin := r.Header.Get("Origin")
+			_, isAllowed := allowed[origin]
+
+			if origin == "" {
+				// Same-origin / non-browser request — no CORS headers needed.
+			} else if isAllowed {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Set("Vary", "Origin")
 				w.Header().Set("Access-Control-Allow-Credentials", "true")
-			} else {
+			} else if wildcard {
+				// Only used when "*" is explicitly configured. With
+				// credentials disallowed by browsers in this case, this is
+				// safe for fully-public endpoints.
 				w.Header().Set("Access-Control-Allow-Origin", "*")
 			}
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			// Disallowed + non-wildcard: set NO Access-Control-Allow-Origin
+			// header. Browsers will then block the response.
+
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
 			w.Header().Set("Access-Control-Max-Age", "600")
 

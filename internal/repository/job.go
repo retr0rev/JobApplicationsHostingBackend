@@ -14,6 +14,37 @@ func NewJobRepo(db *sql.DB) *JobRepo {
 	return &JobRepo{db: db}
 }
 
+const jobSelectColumns = `j.id, j.client_id, j.jobtitle, j.description, j.status,
+	j.category, j.location, c.c_email, c.phone_number,
+	COALESCE(c.company_name, ''), COALESCE(c.company_website, ''),
+	COALESCE(c.company_logo_url, ''), COALESCE(c.company_bio, '')`
+
+const jobJoinClause = ` FROM JOBSAPPS j JOIN CLIENTS c ON j.client_id = c.id `
+
+func scanJobWithContact(s interface {
+	Scan(dest ...interface{}) error
+}) (*models.JobApp, error) {
+	j := &models.JobApp{}
+	var phone sql.NullString
+	err := s.Scan(
+		&j.ID, &j.ClientID, &j.JobTitle, &j.Description,
+		&j.Status, &j.Category, &j.Location,
+		&j.ClientEmail, &phone,
+		&j.CompanyName, &j.CompanyWebsite, &j.CompanyLogoURL, &j.CompanyBio,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("scan job: %w", err)
+	}
+	if phone.Valid {
+		s := phone.String
+		j.PhoneNumber = &s
+	}
+	return j, nil
+}
+
 func (r *JobRepo) Create(clientID int64, title, description, category, location string) (*models.JobApp, error) {
 	res, err := r.db.Exec(
 		"INSERT INTO JOBSAPPS (client_id, jobtitle, description, status, category, location) VALUES (?, ?, ?, ?, ?, ?)",
@@ -24,20 +55,12 @@ func (r *JobRepo) Create(clientID int64, title, description, category, location 
 	}
 
 	id, _ := res.LastInsertId()
-	return &models.JobApp{
-		ID:          id,
-		ClientID:    clientID,
-		JobTitle:    title,
-		Description: description,
-		Status:      models.StatusPending,
-		Category:    category,
-		Location:    location,
-	}, nil
+	return r.FindByIDAdmin(id)
 }
 
 func (r *JobRepo) ListByClient(clientID int64) ([]models.JobApp, error) {
 	rows, err := r.db.Query(
-		"SELECT id, client_id, jobtitle, description, status, category, location FROM JOBSAPPS WHERE client_id = ? ORDER BY id DESC",
+		"SELECT "+jobSelectColumns+jobJoinClause+"WHERE j.client_id = ? ORDER BY j.id DESC",
 		clientID,
 	)
 	if err != nil {
@@ -47,18 +70,18 @@ func (r *JobRepo) ListByClient(clientID int64) ([]models.JobApp, error) {
 
 	var jobs []models.JobApp
 	for rows.Next() {
-		var j models.JobApp
-		if err := rows.Scan(&j.ID, &j.ClientID, &j.JobTitle, &j.Description, &j.Status, &j.Category, &j.Location); err != nil {
-			return nil, fmt.Errorf("scan job: %w", err)
+		j, err := scanJobWithContact(rows)
+		if err != nil {
+			return nil, err
 		}
-		jobs = append(jobs, j)
+		jobs = append(jobs, *j)
 	}
 	return jobs, rows.Err()
 }
 
 func (r *JobRepo) ListAll() ([]models.JobApp, error) {
 	rows, err := r.db.Query(
-		"SELECT id, client_id, jobtitle, description, status, category, location FROM JOBSAPPS ORDER BY id DESC",
+		"SELECT " + jobSelectColumns + jobJoinClause + "ORDER BY j.id DESC",
 	)
 	if err != nil {
 		return nil, fmt.Errorf("query all jobs: %w", err)
@@ -67,45 +90,50 @@ func (r *JobRepo) ListAll() ([]models.JobApp, error) {
 
 	var jobs []models.JobApp
 	for rows.Next() {
-		var j models.JobApp
-		if err := rows.Scan(&j.ID, &j.ClientID, &j.JobTitle, &j.Description, &j.Status, &j.Category, &j.Location); err != nil {
-			return nil, fmt.Errorf("scan job: %w", err)
+		j, err := scanJobWithContact(rows)
+		if err != nil {
+			return nil, err
 		}
-		jobs = append(jobs, j)
+		jobs = append(jobs, *j)
+	}
+	return jobs, rows.Err()
+}
+
+func (r *JobRepo) ListApproved() ([]models.JobApp, error) {
+	rows, err := r.db.Query(
+		"SELECT "+jobSelectColumns+jobJoinClause+"WHERE j.status = ? ORDER BY j.id DESC",
+		models.StatusApproved,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query approved jobs: %w", err)
+	}
+	defer rows.Close()
+
+	var jobs []models.JobApp
+	for rows.Next() {
+		j, err := scanJobWithContact(rows)
+		if err != nil {
+			return nil, err
+		}
+		jobs = append(jobs, *j)
 	}
 	return jobs, rows.Err()
 }
 
 func (r *JobRepo) FindByID(id, clientID int64) (*models.JobApp, error) {
 	row := r.db.QueryRow(
-		"SELECT id, client_id, jobtitle, description, status, category, location FROM JOBSAPPS WHERE id = ? AND client_id = ?",
+		"SELECT "+jobSelectColumns+jobJoinClause+"WHERE j.id = ? AND j.client_id = ?",
 		id, clientID,
 	)
-
-	var j models.JobApp
-	if err := row.Scan(&j.ID, &j.ClientID, &j.JobTitle, &j.Description, &j.Status, &j.Category, &j.Location); err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("query job: %w", err)
-	}
-	return &j, nil
+	return scanJobWithContact(row)
 }
 
 func (r *JobRepo) FindByIDAdmin(id int64) (*models.JobApp, error) {
 	row := r.db.QueryRow(
-		"SELECT id, client_id, jobtitle, description, status, category, location FROM JOBSAPPS WHERE id = ?",
+		"SELECT "+jobSelectColumns+jobJoinClause+"WHERE j.id = ?",
 		id,
 	)
-
-	var j models.JobApp
-	if err := row.Scan(&j.ID, &j.ClientID, &j.JobTitle, &j.Description, &j.Status, &j.Category, &j.Location); err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("query job: %w", err)
-	}
-	return &j, nil
+	return scanJobWithContact(row)
 }
 
 func (r *JobRepo) UpdateStatus(id int64, status string) error {
@@ -142,6 +170,23 @@ func (r *JobRepo) Delete(id, clientID int64) error {
 	)
 	if err != nil {
 		return fmt.Errorf("delete job: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// DeleteAdmin removes a job without an ownership check. Used by admin
+// moderation endpoints. Returns sql.ErrNoRows if the job does not exist.
+func (r *JobRepo) DeleteAdmin(id int64) error {
+	res, err := r.db.Exec("DELETE FROM JOBSAPPS WHERE id = ?", id)
+	if err != nil {
+		return fmt.Errorf("delete job (admin): %w", err)
 	}
 	affected, err := res.RowsAffected()
 	if err != nil {

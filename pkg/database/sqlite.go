@@ -2,8 +2,10 @@ package database
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -37,7 +39,8 @@ func migrate(db *sql.DB) error {
 		`CREATE TABLE IF NOT EXISTS ADMINS (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			email TEXT NOT NULL UNIQUE,
-			password TEXT NOT NULL
+			password TEXT NOT NULL,
+			admin_role TEXT NOT NULL DEFAULT 'super_admin'
 		)`,
 		`CREATE TABLE IF NOT EXISTS CLIENTS (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -48,7 +51,12 @@ func migrate(db *sql.DB) error {
 			verify_token_hash TEXT,
 			verify_token_expiry DATETIME,
 			reset_token_hash TEXT,
-			reset_token_expiry DATETIME
+			reset_token_expiry DATETIME,
+			company_name TEXT NOT NULL DEFAULT '',
+			company_website TEXT NOT NULL DEFAULT '',
+			company_logo_url TEXT NOT NULL DEFAULT '',
+			company_bio TEXT NOT NULL DEFAULT '',
+			created_by_admin_id INTEGER
 		)`,
 		`CREATE TABLE IF NOT EXISTS JOBSAPPS (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -67,5 +75,40 @@ func migrate(db *sql.DB) error {
 			return err
 		}
 	}
+
+	// Idempotent column additions for older databases that pre-date the
+	// employer-profile / admin-role fields. SQLite has no "ADD COLUMN IF NOT
+	// EXISTS", so we detect and ignore "duplicate column" errors.
+	addCols := []struct {
+		table string
+		col   string
+		def   string
+	}{
+		{"ADMINS", "admin_role", "TEXT NOT NULL DEFAULT 'super_admin'"},
+		{"CLIENTS", "company_name", "TEXT NOT NULL DEFAULT ''"},
+		{"CLIENTS", "company_website", "TEXT NOT NULL DEFAULT ''"},
+		{"CLIENTS", "company_logo_url", "TEXT NOT NULL DEFAULT ''"},
+		{"CLIENTS", "company_bio", "TEXT NOT NULL DEFAULT ''"},
+		{"CLIENTS", "created_by_admin_id", "INTEGER"},
+	}
+	for _, c := range addCols {
+		stmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", c.table, c.col, c.def)
+		if _, err := db.Exec(stmt); err != nil {
+			if !isDuplicateColumnErr(err) {
+				return fmt.Errorf("alter %s add %s: %w", c.table, c.col, err)
+			}
+		}
+	}
+
 	return nil
 }
+
+func isDuplicateColumnErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "duplicate column") || strings.Contains(msg, "already exists")
+}
+
+var _ = errors.New

@@ -7,14 +7,21 @@ import (
 	"strings"
 	"time"
 
+	"jobapps/internal/models"
+
 	"github.com/golang-jwt/jwt/v5"
+)
+
+const (
+	CookieTokenKey = "token"
 )
 
 type contextKey string
 
 const (
-	ClientIDKey contextKey = "client_id"
-	AdminIDKey  contextKey = "admin_id"
+	ClientIDKey  contextKey = "client_id"
+	AdminIDKey   contextKey = "admin_id"
+	AdminRoleKey contextKey = "admin_role"
 )
 
 func getJWTSecret() []byte {
@@ -29,22 +36,90 @@ func GenerateToken(claims jwt.MapClaims) (string, error) {
 	return token.SignedString(getJWTSecret())
 }
 
+// getCookieDomain returns the domain for the auth cookie.
+// In production (TLS enabled) it returns ".wirehire.com" so the cookie is
+// shared across all subdomains. On localhost it returns "" (same-origin only).
+func getCookieDomain() string {
+	if os.Getenv("TLS_ENABLED") == "true" {
+		if d := os.Getenv("COOKIE_DOMAIN"); d != "" {
+			return d
+		}
+		return ".wirehire.com"
+	}
+	return ""
+}
+
+func isSecure() bool {
+	return os.Getenv("TLS_ENABLED") == "true"
+}
+
+// SetAuthCookie writes the JWT as an httpOnly cookie on the response.
+func SetAuthCookie(w http.ResponseWriter, token string) {
+	c := &http.Cookie{
+		Name:     CookieTokenKey,
+		Value:    token,
+		Path:     "/",
+		Domain:   getCookieDomain(),
+		HttpOnly: true,
+		Secure:   isSecure(),
+		SameSite: http.SameSiteNoneMode,
+		MaxAge:   72 * 60 * 60, // 72h, matching JWT expiry
+	}
+	if !isSecure() {
+		// SameSite=None requires Secure in browsers, but on localhost
+		// (secure context) this is accepted. Drop SameSite on non-TLS
+		// so the cookie works cross-origin in development.
+		c.SameSite = http.SameSiteDefaultMode
+	}
+	http.SetCookie(w, c)
+}
+
+// ClearAuthCookie unsets the auth cookie (used on logout).
+func ClearAuthCookie(w http.ResponseWriter) {
+	c := &http.Cookie{
+		Name:     CookieTokenKey,
+		Value:    "",
+		Path:     "/",
+		Domain:   getCookieDomain(),
+		HttpOnly: true,
+		Secure:   isSecure(),
+		SameSite: http.SameSiteNoneMode,
+		MaxAge:   -1,
+	}
+	if !isSecure() {
+		c.SameSite = http.SameSiteDefaultMode
+	}
+	http.SetCookie(w, c)
+}
+
+// requireAuth checks role + ID claim. For admins, optionally capture the
+// admin_role claim too so downstream handlers can do finer-grained RBAC.
+// It reads the token from the Authorization header first, then falls back
+// to the "token" httpOnly cookie.
 func requireAuth(requiredRole string, idClaim string, key contextKey) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			tokenStr := ""
+
 			authHeader := r.Header.Get("Authorization")
-			if authHeader == "" {
-				http.Error(w, `{"error":"missing authorization header"}`, http.StatusUnauthorized)
-				return
+			if authHeader != "" {
+				parts := strings.SplitN(authHeader, " ", 2)
+				if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
+					tokenStr = parts[1]
+				}
 			}
 
-			parts := strings.SplitN(authHeader, " ", 2)
-			if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-				http.Error(w, `{"error":"invalid authorization format"}`, http.StatusUnauthorized)
-				return
+			// Fall back to httpOnly cookie if no Bearer header.
+			if tokenStr == "" {
+				if c, err := r.Cookie(CookieTokenKey); err == nil && c.Value != "" {
+					tokenStr = c.Value
+				}
 			}
 
-			tokenStr := parts[1]
+			if tokenStr == "" {
+				http.Error(w, `{"error":"missing authorization"}`, http.StatusUnauthorized)
+				return
+			}
 			token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (interface{}, error) {
 				if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 					return nil, jwt.ErrSignatureInvalid
@@ -76,6 +151,14 @@ func requireAuth(requiredRole string, idClaim string, key contextKey) func(http.
 			}
 
 			ctx := context.WithValue(r.Context(), key, int64(idFloat))
+
+			// Surface admin role to handlers for fine-grained checks.
+			if requiredRole == "admin" {
+				if roleStr, ok := claims["admin_role"].(string); ok {
+					ctx = context.WithValue(ctx, AdminRoleKey, roleStr)
+				}
+			}
+
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
@@ -89,6 +172,29 @@ func AdminAuth(next http.Handler) http.Handler {
 	return requireAuth("admin", "admin_id", AdminIDKey)(next)
 }
 
+// AdminRoleAtLeast returns a middleware that allows admins whose role is in
+// the given set. Must run after AdminAuth so AdminRoleKey is set.
+func AdminRoleAtLeast(allowed ...string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			role, _ := r.Context().Value(AdminRoleKey).(string)
+			for _, a := range allowed {
+				if role == a {
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+			http.Error(w, `{"error":"insufficient permissions"}`, http.StatusForbidden)
+		})
+	}
+}
+
+// Convenience aliases.
+var (
+	SuperAdminOnly      = AdminRoleAtLeast(models.AdminRoleSuperAdmin)
+	ModeratorOrAbove    = AdminRoleAtLeast(models.AdminRoleSuperAdmin, models.AdminRoleModerator)
+)
+
 func GetClientID(r *http.Request) int64 {
 	id, _ := r.Context().Value(ClientIDKey).(int64)
 	return id
@@ -97,4 +203,9 @@ func GetClientID(r *http.Request) int64 {
 func GetAdminID(r *http.Request) int64 {
 	id, _ := r.Context().Value(AdminIDKey).(int64)
 	return id
+}
+
+func GetAdminRole(r *http.Request) string {
+	role, _ := r.Context().Value(AdminRoleKey).(string)
+	return role
 }

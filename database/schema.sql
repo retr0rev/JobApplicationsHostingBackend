@@ -1,7 +1,8 @@
 CREATE TABLE ADMINS (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     email TEXT NOT NULL UNIQUE,
-    password TEXT NOT NULL
+    password TEXT NOT NULL,
+    admin_role TEXT NOT NULL DEFAULT 'super_admin'
 );
 
 CREATE TABLE CLIENTS (
@@ -13,7 +14,12 @@ CREATE TABLE CLIENTS (
     verify_token_hash TEXT,
     verify_token_expiry DATETIME,
     reset_token_hash TEXT,
-    reset_token_expiry DATETIME
+    reset_token_expiry DATETIME,
+    company_name TEXT NOT NULL DEFAULT '',
+    company_website TEXT NOT NULL DEFAULT '',
+    company_logo_url TEXT NOT NULL DEFAULT '',
+    company_bio TEXT NOT NULL DEFAULT '',
+    created_by_admin_id INTEGER
 );
 
 CREATE TABLE JOBSAPPS (
